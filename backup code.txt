@@ -1,0 +1,188 @@
+# Step 2: Preview and edit fields from the first row of the selected sheet
+if not df.empty:
+    st.subheader("Fields name")
+    first_row = df.iloc[0]
+    cols_to_show = list(df.columns)
+    # Show preview table with delete button in the same row
+    st.markdown("**Fields from First Row of Excel File**")
+    header_cols = st.columns([1, 3, 4, 2])
+    header_cols[0].markdown("**No.**")
+    header_cols[1].markdown("**Field Name**")
+    header_cols[2].markdown("**Value**")
+    header_cols[3].markdown("")
+
+    for idx, col in enumerate(cols_to_show, 1):
+        val = first_row[col]
+        if pd.isna(val) or val == '':
+            val = "No Value In this Column"
+        row_cols = st.columns([1, 3, 4, 2])
+        row_cols[0].write(idx)
+        row_cols[1].write(col)
+        row_cols[2].write(val)
+        col_key = f"delete_{idx}_{col}"
+        if row_cols[3].button("❌", key=col_key):
+            new_df = df.copy().drop(columns=[col])
+            st.session_state['excel_df'] = new_df
+            st.rerun()
+
+def export_to_jrxml(df, report_name="report"):
+    import xml.etree.ElementTree as ET
+    import io
+    ns = "http://jasperreports.sourceforge.net/jasperreports"
+    ET.register_namespace('', ns)
+    # Set each field name's width to a default value
+    default_col_width = 120
+    width_per_col = default_col_width
+    total_width = max(595, width_per_col * len(df.columns))
+    left_margin = 20
+    right_margin = 20
+    column_width = total_width - left_margin - right_margin
+    root = ET.Element("jasperReport", attrib={
+        "xmlns": ns,
+        "name": report_name,
+        "pageWidth": str(total_width),
+        "pageHeight": "842",
+        "columnWidth": str(column_width),
+        "leftMargin": str(left_margin),
+        "rightMargin": str(right_margin),
+        "topMargin": "20",
+        "bottomMargin": "20",
+        "language": "plsql"
+    })
+    # Add default data adapter property
+    ET.SubElement(root, "property", attrib={
+        "name": "com.jaspersoft.studio.data.defaultdataadapter",
+        "value": "Multifonds"
+    })
+
+    # Add queryString with PL/SQL call
+    query_string = ET.SubElement(root, "queryString", attrib={"language": "plsql"})
+    proc_call = f"{{call SP_RPT_{report_name.upper()}($P{{ASATDATE}}, $P{{PRODUCTCODE}}, $P{{ORACLE_REF_CURSOR}})}}"
+    query_string.text = proc_call
+    # Add <field> elements for data binding
+    for col in df.columns:
+        ET.SubElement(root, "field", attrib={
+            "name": str(col),
+            "class": "java.lang.String"
+        })
+
+    # Title band
+    title = ET.SubElement(root, "title")
+    title_band = ET.SubElement(title, "band", attrib={"height": "50"})
+    title_text = ET.SubElement(title_band, "staticText")
+    ET.SubElement(title_text, "reportElement", attrib={"x": "0", "y": "0", "width": str(column_width), "height": "50"})
+    ET.SubElement(title_text, "textElement")
+    title_text_value = ET.SubElement(title_text, "text")
+    title_text_value.text = report_name
+
+    # Page header band
+    page_header = ET.SubElement(root, "pageHeader")
+    page_header_band = ET.SubElement(page_header, "band", attrib={"height": "30"})
+
+    # Column header band with <staticText> for each field name
+    column_header = ET.SubElement(root, "columnHeader")
+    band = ET.SubElement(column_header, "band", attrib={"height": "30"})
+    x = 0
+    for col in df.columns:
+        static_text = ET.SubElement(band, "staticText")
+        ET.SubElement(static_text, "reportElement", attrib={"x": str(x), "y": "0", "width": str(width_per_col), "height": "30"})
+        ET.SubElement(static_text, "textElement")
+        text = ET.SubElement(static_text, "text")
+        text.text = str(col)
+        x += width_per_col
+
+    # Detail band
+    detail = ET.SubElement(root, "detail")
+    detail_band = ET.SubElement(detail, "band", attrib={"height": "30"})
+    x = 0
+    for col in df.columns:
+        text_field = ET.SubElement(detail_band, "textField")
+        ET.SubElement(text_field, "reportElement", attrib={"x": str(x), "y": "0", "width": str(width_per_col), "height": "30"})
+        ET.SubElement(text_field, "textElement")
+        text_field_expr = ET.SubElement(text_field, "textFieldExpression")
+        text_field_expr.text = f"$F{{{col}}}"
+        x += width_per_col
+
+    # Column footer band
+    column_footer = ET.SubElement(root, "columnFooter")
+    column_footer_band = ET.SubElement(column_footer, "band", attrib={"height": "30"})
+
+    # Page footer band
+    page_footer = ET.SubElement(root, "pageFooter")
+    page_footer_band = ET.SubElement(page_footer, "band", attrib={"height": "30"})
+
+    # Summary band
+    summary = ET.SubElement(root, "summary")
+    summary_band = ET.SubElement(summary, "band", attrib={"height": "30"})
+
+    buf = io.BytesIO()
+    tree = ET.ElementTree(root)
+    tree.write(buf, encoding="utf-8", xml_declaration=True)
+    buf.seek(0)
+    return buf
+
+if len(df.columns) > 0:
+    # Option to rename the file before downloading
+    default_name = "exported_report"
+    file_name = st.text_input("JRXML file name (without .jrxml extension):", value=default_name, key="jrxml_filename")
+    jrxml_buf = export_to_jrxml(df, report_name=file_name)
+
+    # Prepare SQL procedure export
+    proc_name = f"SP_RPT_{file_name.upper()}"
+    field_list = ',\n    '.join([str(col) for col in df.columns])
+    # Generate CREATE TABLE statement for procedure SQL
+    create_table_fields = ',\n    '.join([f"{col} VARCHAR2(255)" for col in df.columns])
+    create_table_sql = f"""CREATE TABLE table_name (
+    {create_table_fields}
+);
+"""
+    sql_code = f"""create or replace PROCEDURE {proc_name} (
+    p_AsOfDate IN VARCHAR2, 
+    p_ProductId IN VARCHAR2,
+    p_result OUT SYS_REFCURSOR  
+    )IS 
+    BEGIN 
+    OPEN p_result FOR 
+ 
+SELECT
+
+    {field_list}
+
+  FROM VW_TABLENAME;
+  {create_table_sql}END {proc_name};
+"""
+    sql_buf = io.BytesIO(sql_code.encode('utf-8'))
+
+    # Generate separate CREATE TABLE SQL for download
+    tbl_name = f'TBL_RPT_{file_name.upper()}'
+    tbl_fields = ',\n    '.join([f'"{col}" VARCHAR2(100 BYTE)' for col in df.columns])
+    tbl_sql = f'''CREATE TABLE "CUSTOMER"."{tbl_name}" \n(\n    {tbl_fields}\n);\n'''
+    tbl_sql_buf = io.BytesIO(tbl_sql.encode('utf-8'))
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.download_button(
+            label="Download as JRXML",
+            data=jrxml_buf,
+            file_name=f"{file_name}.jrxml",
+            mime="application/xml",
+            key=f"download_jrxml_button_{len(df.columns)}"
+        )
+    with col2:
+        st.download_button(
+            label="Download SQL Procedure",
+            data=sql_buf,
+            file_name=f"{file_name}.sql",
+            mime="text/x-sql",
+            key=f"download_sql_button_{len(df.columns)}"
+        )
+    with col3:
+        st.download_button(
+            label="Download Table SQL",
+            data=tbl_sql_buf,
+            file_name=f"{tbl_name}.sql",
+            mime="text/x-sql",
+            key=f"download_tbl_sql_button_{len(df.columns)}"
+        )
+else:
+    st.info("Import .xlsx file.")
